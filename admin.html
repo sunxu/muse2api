@@ -1658,6 +1658,7 @@ async function loadPool(){
           <button class="ghost mini" onclick="queryQuota('${a.id}', this)">额度</button>
           <button class="ghost mini" onclick="toggleAcc('${a.id}', ${!a.enabled})">${a.enabled ? '禁用' : '启用'}</button>
           <button class="ghost mini" onclick="renameAcc('${a.id}','${esc(a.label)}')">改名</button>
+          <button class="ghost mini" onclick="openProxyEditor('${a.id}')">${a.has_proxy ? '代理✓' : '设置代理'}</button>
           <button class="ghost mini" onclick="updateCookies('${a.id}')">更新Cookie</button>
           <button class="danger mini" onclick="delAcc('${a.id}','${esc(a.label)}')">删除</button>
         </div></td>
@@ -1731,6 +1732,37 @@ async function toggleAcc(id, enabled){
   }catch(e){ toast('操作失败：' + e.message, 'bad'); }
 }
 
+let activeProxyAccount = null;
+function openProxyEditor(id){
+  activeProxyAccount = id;
+  const account = accounts.find(a => a.id === id);
+  $('proxyAccountName').textContent = account ? account.label : id;
+  $('proxyCurrent').textContent = account && account.has_proxy
+    ? '已配置认证代理（账号密码不回显）' : '尚未配置代理（保留直连）';
+  $('proxyInput').value = '';
+  $('proxyDialog').showModal();
+}
+async function saveAccountProxy(clear){
+  if (!activeProxyAccount) return;
+  const url = clear ? '' : $('proxyInput').value.trim();
+  if (!clear && !url) return toast('请填写带账号密码的代理地址', 'warn');
+  try {
+    await api(`/admin/accounts/${activeProxyAccount}`, {
+      method:'PATCH', body:JSON.stringify({proxy_url:url})
+    });
+    $('proxyInput').value = '';
+    $('proxyDialog').close();
+    toast(clear ? '已取消代理绑定' : '认证代理已保存', 'ok');
+    loadPool();
+  }catch(e){toast('保存代理失败：' + e.message, 'bad');}
+}
+async function testAccountProxy(){
+  if (!activeProxyAccount) return;
+  try{
+    const result = await api(`/admin/accounts/${activeProxyAccount}/proxy-test`, {method:'POST'});
+    toast('代理连接成功，出口 IP: ' + result.ip, 'ok');
+  }catch(e){toast('代理测试失败：' + e.message, 'bad');}
+}
 async function renameAcc(id, old){
   const label = prompt('新的账号标签：', old);
   if (label === null || !label.trim()) return;
@@ -2167,5 +2199,20 @@ setInterval(() => {
   loadRepoStatus(false);
 }, 60000);
 </script>
+<dialog id="proxyDialog" style="width:min(560px,94vw);max-width:94vw;padding:22px;border-radius:12px;border:1px solid #666;background:var(--card,#20252c);color:inherit">
+  <h3>账号代理配置：<span id="proxyAccountName"></span></h3>
+  <p id="proxyCurrent" style="opacity:.8"></p>
+  <label for="proxyInput">HTTP / SOCKS5 用户名密码代理</label>
+  <input id="proxyInput" type="password" autocomplete="new-password" spellcheck="false"
+         placeholder="http://user:password@proxy.example:8080"
+         style="display:block;width:100%;margin:10px 0 14px;padding:10px">
+  <p style="font-size:12px;opacity:.8">凭据不会回显。输入新地址后点击保存；测试只访问固定的公网 IP 检测服务，不调用 Muse。</p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button onclick="saveAccountProxy(false)">保存代理</button>
+    <button onclick="testAccountProxy()">测试已保存代理</button>
+    <button onclick="saveAccountProxy(true)">恢复直连</button>
+    <button onclick="document.getElementById('proxyInput').value='';document.getElementById('proxyDialog').close()">关闭</button>
+  </div>
+</dialog>
 </body>
 </html>
