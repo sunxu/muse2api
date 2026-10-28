@@ -297,3 +297,96 @@ def test_admin_proxy_save_redacted_and_busy_change_rejected(tmp_path):
         result = app.patch_account(acc["id"], app.AccountPatch(proxy_url=""))
         assert result["has_proxy"] is False
         assert isolated.get_account(acc["id"])["proxy_url"] == ""
+
+
+class FakeHTTPNoAuthProxy(socketserver.BaseRequestHandler):
+    """Fake unauthenticated HTTP proxy: reject unexpected Basic credentials."""
+    def handle(self):
+        header, tail = head(self.request)
+        self.server.requests.append(header)
+        if b"Proxy-Authorization:" in header:
+            self.request.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            return
+        if header.startswith(b"CONNECT "):
+            self.request.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            content = tail or self.request.recv(1024)
+            self.server.payloads.append(content)
+            self.request.sendall(b"reply")
+        else:
+            self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nPONG")
+
+
+class FakeSOCKSNoAuthProxy(socketserver.BaseRequestHandler):
+    """SOCKS5 must negotiate method 0x00 and not send username/password."""
+    def handle(self):
+        s = self.request
+        assert exact(s, 3) == b"\x05\x01\x00"
+        s.sendall(b"\x05\x00")
+        start = exact(s, 4)
+        assert start[:3] == b"\x05\x01\x00"
+        if start[3] == 3:
+            hostname = exact(s, exact(s, 1)[0])
+        elif start[3] == 1:
+            hostname = exact(s, 4)
+        else:
+            hostname = exact(s, 16)
+        port = int.from_bytes(exact(s, 2), "big")
+        self.server.destinations.append((hostname, port))
+        s.sendall(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x50")
+        h, _ = head(s)
+        self.server.requests.append(h)
+        s.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nPONG")
+
+
+def test_noauth_proxy_url_accepts_empty_credentials_but_not_partial():
+    for scheme in ("http", "socks5"):
+        url = f"{scheme}://127.0.0.1:20240"
+        parsed = parse_proxy(url)
+        assert parsed.scheme == scheme
+        assert parsed.host == "127.0.0.1"
+        assert parsed.port == 20240
+        assert parsed.username == "" and parsed.password == ""
+        empty = parse_proxy(f"{scheme}://:@127.0.0.1:20240")
+        assert empty.username == "" and empty.password == ""
+        for invalid in (f"{scheme}://user@127.0.0.1:20240",
+                        f"{scheme}://user:@127.0.0.1:20240",
+                        f"{scheme}://:password@127.0.0.1:20240"):
+            with pytest.raises(ProxyConfigError):
+                parse_proxy(invalid)
+
+
+def test_noauth_http_proxy_get_and_https_connect():
+    with upstream(FakeHTTPNoAuthProxy) as server:
+        manager = ProxyBridgeManager()
+        try:
+            local = manager.local_url(
+                "local-http", f"http://127.0.0.1:{server.server_address[1]}")
+            response = requests.get(
+                "http://example.invalid/noauth", proxies={"http": local}, timeout=5)
+            assert response.status_code == 200 and response.text == "PONG"
+            port = int(local.rsplit(":", 1)[1])
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+                client.sendall(b"CONNECT example.test:443 HTTP/1.1\r\nHost: example.test:443\r\n\r\n")
+                assert client.recv(4096).startswith(b"HTTP/1.1 200")
+                client.sendall(b"hello")
+                assert client.recv(4096) == b"reply"
+            assert len(server.requests) == 2
+            assert all(b"Proxy-Authorization:" not in h for h in server.requests)
+            assert server.payloads == [b"hello"]
+        finally:
+            manager.close_all()
+
+
+def test_noauth_socks5_proxy_uses_method_zero():
+    with upstream(FakeSOCKSNoAuthProxy) as server:
+        manager = ProxyBridgeManager()
+        try:
+            local = manager.local_url(
+                "local-socks", f"socks5://127.0.0.1:{server.server_address[1]}")
+            response = requests.get(
+                "http://example.test/noauth", proxies={"http": local}, timeout=5)
+            assert response.status_code == 200 and response.text == "PONG"
+            assert server.destinations == [(b"example.test", 80)]
+            assert server.requests[0].startswith(b"GET /noauth HTTP/1.1")
+        finally:
+            manager.close_all()
