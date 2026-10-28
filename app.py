@@ -1751,22 +1751,32 @@ def del_account(aid: str, _=Depends(auth)):
 
 @app.post("/admin/accounts/{aid}/proxy-test")
 def test_account_proxy(aid: str, _=Depends(auth)):
-    """Only contact a fixed public IP endpoint through the account's proxy."""
+    """Via this account's assigned bridge, verify Cloudflare HTTPS exit IP."""
+    import ipaddress
     import requests
     acc = store.get_account(aid)
     if not acc:
         raise HTTPException(404, "账号不存在")
     if not acc.get("proxy_url"):
-        raise HTTPException(400, "该账号未配置认证代理")
+        raise HTTPException(400, "该账号未配置代理")
     try:
         _, proxy = engine.proxy_for_account(aid)
-        response = requests.get("https://api.ipify.org?format=json", timeout=15,
-                                proxies={"http": proxy, "https": proxy},
-                                allow_redirects=False)
-        response.raise_for_status()
-        return {"ok": True, "ip": response.json()["ip"]}
+        with requests.Session() as session:
+            session.trust_env = False  # Never inherit environment proxies or NO_PROXY.
+            response = session.get(
+                "https://www.cloudflare.com/cdn-cgi/trace", timeout=15,
+                proxies={"http": proxy, "https": proxy},
+                allow_redirects=False,
+            )
+            response.raise_for_status()
+            entries = dict(
+                line.split("=", 1) for line in response.text.splitlines()
+                if "=" in line
+            )
+        ip = str(ipaddress.ip_address(entries["ip"]))
+        return {"ok": True, "ip": ip}
     except Exception:
-        raise HTTPException(502, "代理连接或认证失败，请检查设置") from None
+        raise HTTPException(502, "代理 HTTPS 出口检测失败，请检查设置") from None
 
 
 @app.post("/admin/accounts/{aid}/test")
