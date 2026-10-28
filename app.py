@@ -51,6 +51,7 @@ from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MuseAuthError, MuseEngine, MuseGenerationError,
                     MuseModelRefusalError, RefImageSafetyError)
 from store import Store, account_expiry, min_expiry
+from proxy_bridge import ProxyConfigError, parse_proxy
 
 import sys
 log = logging.getLogger("muse2api")
@@ -81,6 +82,7 @@ app.add_middleware(CORSMiddleware,
 
 store = Store(CFG)
 engine = MuseEngine(CFG)
+engine.proxy_resolver = lambda aid: (store.get_account(aid) or {}).get("proxy_url", "")
 
 
 class ConcurrencyLock:
@@ -295,7 +297,9 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
         engine._last_http_renew[acc_id] = last_sync
         return acc
     try:
-        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm)
+        _, proxy_server = engine.proxy_for_account(acc_id)
+        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"),
+                                        wake_vm=wake_vm, proxy_server=proxy_server)
         engine._last_http_renew[acc_id] = now
         if res.get("cookies"):
             store.update_account(acc_id, cookies=res["cookies"],
@@ -484,6 +488,7 @@ class ResponsesRequest(BaseModel):
 
 class AccountRequest(BaseModel):
     label: str = ""
+    proxy_url: str = ""
     cookies: dict[str, str] = Field(default_factory=dict)
     cookie_header: str | None = None
     batch: str | None = None          # 多行文本，每行一个账号
@@ -493,6 +498,7 @@ class AccountRequest(BaseModel):
 class AccountPatch(BaseModel):
     label: str | None = None
     enabled: bool | None = None
+    proxy_url: str | None = None
 
 
 # ------------------------- 提示词构造 -------------------------
@@ -1659,12 +1665,17 @@ def list_accounts(_=Depends(auth)):
 
 @app.post("/admin/accounts")
 def add_account(req: AccountRequest, _=Depends(auth)):
+    if req.proxy_url:
+        try:
+            parse_proxy(req.proxy_url)
+        except ProxyConfigError as exc:
+            raise HTTPException(400, str(exc)) from None
     added: list[dict] = []
     seen: list[dict] = []          # 本次导入的所有 cookie，用来检查核心项是否齐全
 
     if req.batch:
         for label, cookies in parse_batch(req.batch):
-            acc = store.add_account(cookies, label)
+            acc = store.add_account(cookies, label, proxy_url=req.proxy_url)
             seen.append(cookies)
             added.append({"id": acc["id"], "label": acc["label"],
                           "cookie_count": len(cookies),
@@ -1674,7 +1685,8 @@ def add_account(req: AccountRequest, _=Depends(auth)):
     if req.cookie_header:
         cookies.update(parse_cookie_text(req.cookie_header))
     if cookies:
-        acc = store.add_account(cookies, req.label, cookies_exp=req.expires)
+        acc = store.add_account(cookies, req.label, cookies_exp=req.expires,
+                                proxy_url=req.proxy_url)
         seen.append(cookies)
         added.append({"id": acc["id"], "label": acc["label"],
                       "cookie_count": len(cookies),
@@ -1694,19 +1706,54 @@ def add_account(req: AccountRequest, _=Depends(auth)):
 
 @app.patch("/admin/accounts/{aid}")
 def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
-    acc = store.update_account(aid, label=req.label, enabled=req.enabled)
-    if not acc:
+    old = store.get_account(aid)
+    if not old:
         raise HTTPException(404, "账号不存在")
-    return {k: v for k, v in acc.items() if k != "cookies"} | {
-        "cookie_count": len(acc.get("cookies", {}))}
+    if req.proxy_url is not None and req.proxy_url != old.get("proxy_url", ""):
+        if req.proxy_url:
+            try:
+                parse_proxy(req.proxy_url)
+            except ProxyConfigError as exc:
+                raise HTTPException(400, str(exc)) from None
+        with ACCOUNT_POOL.cond:
+            if aid in ACCOUNT_POOL.busy_accounts:
+                raise HTTPException(409, "账号正在执行任务，请稍后修改代理")
+        engine.proxy_bridges.close(aid)
+    store.update_account(aid, label=req.label, enabled=req.enabled,
+                         proxy_url=req.proxy_url)
+    return next(a for a in store.list_accounts() if a["id"] == aid)
 
 
 @app.delete("/admin/accounts/{aid}")
 def del_account(aid: str, _=Depends(auth)):
+    with ACCOUNT_POOL.cond:
+        if aid in ACCOUNT_POOL.busy_accounts:
+            raise HTTPException(409, "账号正在执行任务，请稍后删除")
     ok = store.delete_account(aid)
     if not ok:
         raise HTTPException(404, "账号不存在")
+    engine.proxy_bridges.close(aid)
     return {"deleted": True, "id": aid}
+
+
+@app.post("/admin/accounts/{aid}/proxy-test")
+def test_account_proxy(aid: str, _=Depends(auth)):
+    """Only contact a fixed public IP endpoint through the account's proxy."""
+    import requests
+    acc = store.get_account(aid)
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+    if not acc.get("proxy_url"):
+        raise HTTPException(400, "该账号未配置认证代理")
+    try:
+        _, proxy = engine.proxy_for_account(aid)
+        response = requests.get("https://api.ipify.org?format=json", timeout=15,
+                                proxies={"http": proxy, "https": proxy},
+                                allow_redirects=False)
+        response.raise_for_status()
+        return {"ok": True, "ip": response.json()["ip"]}
+    except Exception:
+        raise HTTPException(502, "代理连接或认证失败，请检查设置") from None
 
 
 @app.post("/admin/accounts/{aid}/test")
@@ -1722,7 +1769,7 @@ async def test_account(aid: str, _=Depends(auth)):
         with GEN_LOCK:
             try:
                 engine.start()
-                engine.refresh(acc["cookies"], acc.get("cookies_exp"))
+                engine.refresh(acc["cookies"], acc.get("cookies_exp"), account_id=aid)
                 synced = _sync_cookies(aid)
                 quota = None
                 quota_error = None
@@ -1788,7 +1835,7 @@ def relogin(_=Depends(auth)):
         raise HTTPException(400, "没有可用账号")
     try:
         engine.start()
-        engine.refresh(acc["cookies"], acc.get("cookies_exp"))
+        engine.refresh(acc["cookies"], acc.get("cookies_exp"), account_id=acc["id"])
         return {"ok": True, "account": acc["id"]}
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
@@ -2055,7 +2102,9 @@ def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
     if not acc or not acc.get("cookies"):
         return {"ok": False, "id": aid, "label": (acc or {}).get("label", aid), "error": "账号无有效 cookie"}
     try:
-        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=True)
+        _, proxy_server = engine.proxy_for_account(aid)
+        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"),
+                                        wake_vm=True, proxy_server=proxy_server)
         store.update_account(
             aid,
             cookies=res["cookies"],
