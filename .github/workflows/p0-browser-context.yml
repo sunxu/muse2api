@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install project and offline test dependencies
-        run: python -m pip install -r requirements.txt pytest
+        run: python -m pip install -r requirements.txt pytest httpx
       - name: Compile changed Python modules
         run: python -m py_compile engine.py proxy_bridge.py cdp.py app.py tests/test_browser_context_isolation.py tests/test_proxy_bridge.py
       - name: Run offline BrowserContext and concurrency regressions
@@ -30,3 +30,10 @@ jobs:
         run: |
           python tests/test_quota_account_binding.py
           python tests/test_keepalive_scheduling.py
+      - name: Run offline session, wake, refusal and image API regressions
+        run: |
+          python tests/test_session_health.py
+          python tests/test_wake_confirmation.py
+          python tests/test_refusal_rotation.py
+          python tests/test_async_images.py
+          python -m pytest -q tests/test_quota_localization.py
