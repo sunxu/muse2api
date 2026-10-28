@@ -27,10 +27,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制代码与必要目录
-COPY admin.html app.py cdp.py config.py engine.py store.py version.json ./
+COPY admin.html app.py cdp.py config.py engine.py proxy_bridge.py store.py version.json ./
 COPY deploy/ ./deploy/
 COPY extension/ ./extension/
 COPY tools/ ./tools/
+
+# 在构建时检查核心运行模块能否导入，避免镜像启动后才发现缺失文件。
+RUN python -m py_compile app.py engine.py proxy_bridge.py cdp.py store.py \
+    && python -c "import app; from proxy_bridge import parse_proxy; assert parse_proxy('socks5://127.0.0.1:1080').scheme == 'socks5'"
 
 # 创建持久化数据目录
 RUN mkdir -p /app/data/media /app/data/downloads /root/muse2api-profiles
