@@ -390,3 +390,57 @@ def test_noauth_socks5_proxy_uses_method_zero():
             assert server.requests[0].startswith(b"GET /noauth HTTP/1.1")
         finally:
             manager.close_all()
+
+
+def test_admin_proxy_test_uses_cloudflare_and_ignores_environment(tmp_path):
+    from unittest.mock import MagicMock
+    import app
+    from config import Config
+    cfg = Config(base_dir=str(tmp_path))
+    cfg.ensure_dirs()
+    store = Store(cfg)
+    account = store.add_account(
+        {"hatch_sess": "fixture"}, "test",
+        proxy_url="http://127.0.0.1:20240",
+    )
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.get.return_value.text = "fl=22f1\nh=www.cloudflare.com\nip=203.0.113.15\n"
+    with (patch.object(app, "store", store),
+          patch.object(app.engine, "proxy_for_account",
+                       return_value=("http://127.0.0.1:20240", "http://127.0.0.1:23456")),
+          patch("requests.Session", return_value=session)):
+        result = app.test_account_proxy(account["id"])
+    assert result == {"ok": True, "ip": "203.0.113.15"}
+    assert session.trust_env is False
+    session.get.assert_called_once_with(
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        timeout=15,
+        proxies={"http": "http://127.0.0.1:23456", "https": "http://127.0.0.1:23456"},
+        allow_redirects=False,
+    )
+
+
+def test_admin_proxy_test_rejects_invalid_trace_without_returning_payload(tmp_path):
+    from unittest.mock import MagicMock
+    import app
+    from fastapi import HTTPException
+    from config import Config
+    cfg = Config(base_dir=str(tmp_path))
+    cfg.ensure_dirs()
+    store = Store(cfg)
+    account = store.add_account(
+        {"hatch_sess": "fixture"}, "test",
+        proxy_url="socks5://127.0.0.1:65220",
+    )
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.get.return_value.text = "invalid output with secret fixture"
+    with (patch.object(app, "store", store),
+          patch.object(app.engine, "proxy_for_account",
+                       return_value=("socks5://127.0.0.1:65220", "http://127.0.0.1:23457")),
+          patch("requests.Session", return_value=session)):
+        with pytest.raises(HTTPException) as err:
+            app.test_account_proxy(account["id"])
+    assert err.value.status_code == 502
+    assert "secret fixture" not in err.value.detail
