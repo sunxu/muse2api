@@ -332,6 +332,10 @@
           <label>账号标签（单条导入用）</label>
           <input type="text" id="newLabel" placeholder="例如 muse-main">
         </div>
+        <div style="flex:2;min-width:180px">
+          <label>认证代理（可选）</label>
+          <input type="password" id="newProxy" autocomplete="new-password" spellcheck="false" placeholder="http://user:pass@host:port">
+        </div>
         <div style="flex:3">
           <label>Cookie 字符串</label>
           <textarea id="newCookie" rows="4" placeholder="hatch_sess=...; hatch_vml=...&#10;或批量：&#10;acc-01 | hatch_sess=...; hatch_vml=...&#10;acc-02 | hatch_sess=...; hatch_vml=..."></textarea>
@@ -464,6 +468,10 @@
         <div style="max-width:230px">
           <label>账号标签</label>
           <input type="text" id="mLabel" placeholder="例如 acc-01">
+        </div>
+        <div style="flex:2;min-width:180px">
+          <label>认证代理（可选）</label>
+          <input type="password" id="mProxy" autocomplete="new-password" spellcheck="false" placeholder="socks5://user:pass@host:port">
         </div>
         <div style="flex:3">
           <label>Cookie 字符串</label>
@@ -1674,16 +1682,18 @@ async function loadPool(){
 async function addAccount(fromManual){
   const labelEl = $(fromManual ? 'mLabel' : 'newLabel');
   const ckEl    = $(fromManual ? 'mCookie' : 'newCookie');
+  const proxyEl = $(fromManual ? 'mProxy' : 'newProxy');
   const label = labelEl.value.trim();
   const raw = ckEl.value.trim();
   if (!raw) return toast('请先粘贴 Cookie', 'warn');
   const lines = raw.split('\n').map(s => s.trim()).filter(Boolean);
   const body = (lines.length > 1) ? {batch: raw} : {label: label, cookie_header: raw};
+  if (proxyEl.value.trim()) body.proxy_url = proxyEl.value.trim();
   try{
     const r = await api('/admin/accounts', {method:'POST', body: JSON.stringify(body)});
     if (r.warning) toast(r.warning, 'warn');
     else toast(`成功导入 ${r.count} 个账号`, 'ok');
-    ckEl.value = ''; labelEl.value = '';
+    ckEl.value = ''; labelEl.value = ''; proxyEl.value = '';
     loadPool();
   }catch(e){ toast('导入失败：' + e.message, 'bad'); }
 }
