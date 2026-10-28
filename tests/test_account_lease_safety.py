@@ -39,7 +39,7 @@ def ids(env):
 
 def test_pool_atomically_reserves_two_distinct_accounts(env):
     _, pool = env
-    barrier = threading.Barrier(2)
+    barrier = threading.Barrier(3)  # 两个 worker + 主测试线程
     released = threading.Event()
     results = []
 
