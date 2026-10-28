@@ -1709,19 +1709,19 @@ def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
     old = store.get_account(aid)
     if not old:
         raise HTTPException(404, "账号不存在")
-    if req.proxy_url is not None and req.proxy_url != old.get("proxy_url", ""):
+    proxy_changed = req.proxy_url is not None and req.proxy_url != old.get("proxy_url", "")
+    if proxy_changed:
         if req.proxy_url:
             try:
                 parse_proxy(req.proxy_url)
             except ProxyConfigError as exc:
                 raise HTTPException(400, str(exc)) from None
     with ACCOUNT_POOL.cond:
-        if (req.proxy_url is not None and req.proxy_url != old.get("proxy_url", "")
-                and aid in ACCOUNT_POOL.busy_accounts):
+        if proxy_changed and aid in ACCOUNT_POOL.busy_accounts:
             raise HTTPException(409, "账号正在执行任务，请稍后修改代理")
         store.update_account(aid, label=req.label, enabled=req.enabled,
                              proxy_url=req.proxy_url)
-        if req.proxy_url is not None and req.proxy_url != old.get("proxy_url", ""):
+        if proxy_changed:
             engine.proxy_bridges.close(aid)
     return next(a for a in store.list_accounts() if a["id"] == aid)
 
