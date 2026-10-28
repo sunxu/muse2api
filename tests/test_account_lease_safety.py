@@ -250,3 +250,21 @@ def test_media_cancel_before_send_never_submits(tmp_path):
         with pytest.raises(app.MuseGenerationError, match="未提交生成请求"):
             engine.generate({"hatch_sess": "fixture"}, "test", stop_event=stop)
         sent.assert_not_called()
+
+
+def test_chat_acquires_global_generation_lock_before_account_lease(env, monkeypatch):
+    """No lock inversion: media uses GEN_LOCK -> ACCOUNT_POOL; chat must match."""
+    pool = env[1]
+    original_acquire = pool.acquire
+    checked = []
+    def check_lock_order(*args, **kwargs):
+        checked.append(app.GEN_LOCK.locked())
+        return original_acquire(*args, **kwargs)
+    monkeypatch.setattr(pool, "acquire", check_lock_order)
+    monkeypatch.setattr(app, "_renew_and_persist", lambda ident, **kwargs: env[0].get_account(ident))
+    def fake_chat(cookies, prompt, expires, timeout, account_id, stop_event):
+        yield "done"
+    monkeypatch.setattr(app.engine, "chat_stream", fake_chat)
+    assert list(app.safe_chat_stream(None, "hello", None, 3, None)) == ["done"]
+    assert checked == [True]
+    assert not pool.busy_accounts
