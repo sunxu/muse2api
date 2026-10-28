@@ -85,6 +85,7 @@ def _write(path: str, obj):
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d)
+    os.fchmod(fd, 0o600)  # Account cookies and proxy passwords are secret.
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=1)
@@ -106,7 +107,7 @@ class Store:
 
     # ---------- 账号 ----------
     def add_account(self, cookies: dict, label: str = "",
-                    cookies_exp: dict | None = None) -> dict:
+                    cookies_exp: dict | None = None, proxy_url: str = "") -> dict:
         with _LOCK:
             aid = uuid.uuid4().hex[:12]
             exp = {k: int(v) for k, v in (cookies_exp or {}).items()
@@ -117,7 +118,8 @@ class Store:
                    "expiry_anchor": None,
                    "enabled": True, "created_at": now,
                    "last_used": None, "last_keepalive": None, "use_count": 0,
-                   "ok": None, "note": "", "synced_at": None}
+                   "ok": None, "note": "", "synced_at": None,
+                   "proxy_url": proxy_url}
             self.accounts.append(acc)
             _write(self.cfg.accounts_file, self.accounts)
             return acc
@@ -125,7 +127,8 @@ class Store:
     def list_accounts(self) -> list[dict]:
         out = []
         for a in self.accounts:
-            item = {k: v for k, v in a.items() if k != "cookies"}
+            item = {k: v for k, v in a.items() if k not in ("cookies", "proxy_url")}
+            item["has_proxy"] = bool(a.get("proxy_url"))
             ce = a.get("cookies_exp") or {}
             if _is_pos(ce.get("hatch_vml")):
                 item["expires_at"] = int(ce["hatch_vml"])
