@@ -334,7 +334,7 @@
         </div>
         <div style="flex:2;min-width:180px">
           <label>HTTP/SOCKS5 代理（可选）</label>
-          <input type="password" id="newProxy" autocomplete="new-password" spellcheck="false" placeholder="http://user:pass@host:port">
+          <input type="text" id="newProxy" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:20240">
         </div>
         <div style="flex:3">
           <label>Cookie 字符串</label>
@@ -470,8 +470,8 @@
           <input type="text" id="mLabel" placeholder="例如 acc-01">
         </div>
         <div style="flex:2;min-width:180px">
-          <label>认证代理（可选）</label>
-          <input type="password" id="mProxy" autocomplete="new-password" spellcheck="false" placeholder="socks5://user:pass@host:port">
+          <label>HTTP/SOCKS5 代理（可选）</label>
+          <input type="text" id="mProxy" autocomplete="off" spellcheck="false" placeholder="socks5://127.0.0.1:65220">
         </div>
         <div style="flex:3">
           <label>Cookie 字符串</label>
@@ -2213,10 +2213,10 @@ setInterval(() => {
   <h3>账号代理配置：<span id="proxyAccountName"></span></h3>
   <p id="proxyCurrent" style="opacity:.8"></p>
   <label for="proxyInput">HTTP / SOCKS5 代理（用户名密码可选）</label>
-  <input id="proxyInput" type="password" autocomplete="new-password" spellcheck="false"
+  <input id="proxyInput" type="text" autocomplete="off" spellcheck="false"
          placeholder="http://user:password@proxy.example:8080"
          style="display:block;width:100%;margin:10px 0 14px;padding:10px">
-  <p style="font-size:12px;opacity:.8">凭据不会回显。输入新地址后点击保存；测试只访问固定的公网 IP 检测服务，不调用 Muse。</p>
+  <p style="font-size:12px;opacity:.8">已保存的代理地址不会回显。输入框会明文显示正在填写的 URL，若包含密码请注意屏幕隐私；代理测试只访问 Cloudflare，不调用 Muse。</p>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
     <button onclick="saveAccountProxy(false)">保存代理</button>
     <button onclick="testAccountProxy()">测试已保存代理</button>
