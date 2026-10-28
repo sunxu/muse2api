@@ -1,18 +1,21 @@
-# muse2api 多账号认证代理（P1）
+# muse2api 多账号 HTTP/SOCKS5 代理（P1）
 
 > 开发分支功能。仅在明确配置的账号上启用代理；未配置账号保持原项目默认网络行为。未进行真实 Muse 账号的端到端验证。
 
 ## 配置
 
-在管理后台的「账号列表」点击「设置代理」，或在导入账号时填写认证代理。支持：
+在管理后台的「账号列表」点击「设置代理」，或在导入账号时填写代理。支持有认证和无认证两种模式：
 
 ```text
 http://username:password@proxy.example.com:8080
 socks5://username:password@proxy.example.com:1080
+http://127.0.0.1:20240
+socks5://127.0.0.1:65220
 ```
 
+- 不需要用户名密码的代理：直接填写协议、地址和端口。用户名与密码必须同时存在或同时省略；配置不完整会被拒绝。
 - 用户名、密码中的 `@`、`:`、`/`、`#`、`%` 等特殊字符需进行 URL 百分号编码。
-- 不支持无认证代理、HTTPS 上游代理或 SOCKS4；这是当前最小版本的刻意限制。
+- 不支持 HTTPS 上游代理或 SOCKS4；这是当前最小版本的刻意限制。
 - API 方式：`PATCH /admin/accounts/{id}`，JSON 为 `{"proxy_url":"socks5://user:pass@host:1080"}`。
 - 清除：`PATCH /admin/accounts/{id}`，JSON 为 `{"proxy_url":""}`。
 - 状态：`GET /admin/accounts` 返回 `has_proxy` 布尔值，**不会返回** `proxy_url`。
@@ -20,7 +23,7 @@ socks5://username:password@proxy.example.com:1080
 
 ## 实现和边界
 
-每个账号在进程内获得独立的 `127.0.0.1` HTTP 代理监听端口。Chromium CDP 为各账号的 BrowserContext 指定对应的本地代理；本地桥接模块为上游 HTTP Basic 或 SOCKS5 用户名密码代理进行认证。Python 的 `/api/session`、VM 唤醒及核验显式使用同一桥接出口。
+每个账号在进程内获得独立的 `127.0.0.1` HTTP 代理监听端口。Chromium CDP 为各账号的 BrowserContext 指定对应的本地代理；本地桥接模块按需对上游 HTTP Basic 或 SOCKS5 进行用户名密码认证，也支持无需认证的上游代理。Python 的 `/api/session`、VM 唤醒及核验显式使用同一桥接出口。
 
 认证错误、无法连接或代理故障直接失败，不改用直连；BrowserContext 创建失败也禁止回退普通标签页。原有账号并发控制仍然有效。
 
