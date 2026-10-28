@@ -251,64 +251,86 @@ class MuseEngine:
 
     # ---------------- 页面 ----------------
     def _close_page(self):
-        """关闭当前线程专属的页面并销毁隔离的 BrowserContext，彻底释放内存与 Session。"""
+        """关闭线程页面和独立 BrowserContext；销毁失败时保留 ID 供 stop() 重试。"""
         p = self.page
         ctx_id = self.current_context_id
+        self.page = None
+        self.current_context_id = None
+        self.current_acc_id = None
         if p:
             try:
                 p.close()
             except Exception:
-                pass
-            self.page = None
+                log.warning("关闭独立页面连接失败")
         if ctx_id and self.browser:
             try:
                 self.browser.send("Target.disposeBrowserContext", {"browserContextId": ctx_id})
             except Exception:
-                pass
-            with self._contexts_lock:
-                self._active_contexts.discard(ctx_id)
-            self.current_context_id = None
-        self.current_acc_id = None
+                log.warning("销毁 BrowserContext 失败，保留 ID 供后续清理")
+            else:
+                with self._contexts_lock:
+                    self._active_contexts.discard(ctx_id)
 
     def _open_page(self):
-        """为当前工作线程创建独立的页面。
-        若浏览器主连接存在，则创建独立的 Incognito BrowserContext，实现多账号 Cookies 与会话 100% 隔离。"""
-        if self.browser:
-            try:
-                res = self.browser.send("Target.createBrowserContext")
-                ctx_id = res.get("result", {}).get("browserContextId")
-                if ctx_id:
-                    self.current_context_id = ctx_id
-                    with self._contexts_lock:
-                        self._active_contexts.add(ctx_id)
-                    t_res = self.browser.send("Target.createTarget", {
-                        "url": "about:blank",
-                        "browserContextId": ctx_id
-                    })
-                    target_id = t_res.get("result", {}).get("targetId")
-                    if target_id:
-                        ws_url = f"ws://127.0.0.1:{self.cfg.cdp_port}/devtools/page/{target_id}"
-                        page = CDP(ws_url, timeout=180)
-                        page.send("Network.enable")
-                        page.send("Page.enable")
-                        page.send("Runtime.enable")
-                        page.send("Browser.setDownloadBehavior",
-                                  {"behavior": "allow", "downloadPath": self.cfg.download_dir})
-                        return page
-            except Exception as exc:
-                log.warning("Target.createBrowserContext 创建隔离上下文失败，回退到普通标签页: %s", exc)
+        """仅允许独立 BrowserContext；任何失败都不得回退默认标签页。"""
+        if not self.browser:
+            raise MuseGenerationError("浏览器 CDP 未连接，拒绝使用默认浏览器标签页")
 
-        import requests
-        tgt = requests.put(
-            f"http://127.0.0.1:{self.cfg.cdp_port}/json/new?about:blank",
-            timeout=10).json()
-        page = CDP(tgt["webSocketDebuggerUrl"], timeout=180)
-        page.send("Network.enable")
-        page.send("Page.enable")
-        page.send("Runtime.enable")
-        page.send("Browser.setDownloadBehavior",
-                  {"behavior": "allow", "downloadPath": self.cfg.download_dir})
-        return page
+        ctx_id = None
+        page = None
+        try:
+            res = self.browser.send("Target.createBrowserContext")
+            ctx_id = res.get("result", {}).get("browserContextId")
+            if not ctx_id:
+                raise MuseGenerationError("创建独立 BrowserContext 未返回 ID，拒绝继续")
+            self.current_context_id = ctx_id
+            with self._contexts_lock:
+                self._active_contexts.add(ctx_id)
+
+            t_res = self.browser.send("Target.createTarget", {
+                "url": "about:blank",
+                "browserContextId": ctx_id,
+            })
+            target_id = t_res.get("result", {}).get("targetId")
+            if not target_id:
+                raise MuseGenerationError("独立 BrowserContext 内创建页面未返回 Target ID")
+
+            info = self.browser.send("Target.getTargetInfo", {"targetId": target_id})
+            target_info = info.get("result", {}).get("targetInfo", {})
+            if (target_info.get("targetId") != target_id or
+                    target_info.get("browserContextId") != ctx_id):
+                raise MuseGenerationError("页面 BrowserContext 归属校验失败，拒绝继续")
+
+            ws_url = f"ws://127.0.0.1:{self.cfg.cdp_port}/devtools/page/{target_id}"
+            page = CDP(ws_url, timeout=180)
+            page.send("Network.enable")
+            page.send("Page.enable")
+            page.send("Runtime.enable")
+            page.send("Browser.setDownloadBehavior",
+                      {"behavior": "allow", "downloadPath": self.cfg.download_dir})
+            return page
+        except Exception as exc:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    log.warning("初始化失败后关闭页面连接失败")
+            if ctx_id:
+                try:
+                    self.browser.send("Target.disposeBrowserContext",
+                                      {"browserContextId": ctx_id})
+                except Exception:
+                    log.warning("初始化失败后销毁 BrowserContext 失败，保留 ID 供后续清理")
+                else:
+                    with self._contexts_lock:
+                        self._active_contexts.discard(ctx_id)
+            self.current_context_id = None
+            self.current_acc_id = None
+            if isinstance(exc, MuseGenerationError):
+                raise
+            raise MuseGenerationError(
+                "独立 BrowserContext 创建或初始化失败，已禁止回退普通标签页"
+            ) from exc
 
     @staticmethod
     def renew_session_http(cookies: dict, expires: dict | None = None,
@@ -387,11 +409,11 @@ class MuseEngine:
         }
 
     def _apply_cookies(self, page: CDP, cookies: dict, expires: dict | None = None):
-        """注入 cookie。彻底清空旧账号 cookie 保证隔离，且绝不传入过去时间的 expires 防止 Chromium 丢弃 hatch_vml。"""
+        """只向当前隔离 Context 写入 Cookie，清理或注入失败则拒绝继续。"""
         try:
             page.send("Network.clearBrowserCookies")
-        except Exception:
-            pass
+        except Exception as exc:
+            raise MuseGenerationError("清理隔离 Context 的 Cookie 失败") from exc
         now = time.time()
         for name, value in cookies.items():
             if not value:
@@ -401,19 +423,18 @@ class MuseEngine:
                 exp_val = float(exp) if exp and float(exp) > now + 3600 else (now + 7 * 86400)
             except (TypeError, ValueError):
                 exp_val = now + 7 * 86400
+            applied = False
             for dom in (".muse.ai", "muse.ai"):
-                params = {
-                    "name": name,
-                    "value": value,
-                    "domain": dom,
-                    "path": "/",
-                    "secure": True,
-                    "expires": exp_val,
-                }
                 try:
-                    page.send("Network.setCookie", params)
-                except Exception:  # noqa: BLE001
+                    page.send("Network.setCookie", {
+                        "name": name, "value": value, "domain": dom,
+                        "path": "/", "secure": True, "expires": exp_val,
+                    })
+                    applied = True
+                except Exception:
                     pass
+            if not applied:
+                raise MuseGenerationError(f"隔离 Context 注入 Cookie {name} 失败")
 
     def read_cookies(self) -> dict[str, dict]:
         """从当前页面读回 cookie（**包含 httpOnly**，这是网页 JS 做不到的）。
@@ -507,7 +528,8 @@ class MuseEngine:
             pass
 
     def ensure_page(self, cookies: dict, expires: dict | None = None, account_id: str | None = None):
-        if self.page is not None and (account_id is None or getattr(self, "current_acc_id", None) == account_id):
+        if (self.page is not None and self.current_context_id and
+                (account_id is None or self.current_acc_id == account_id)):
             try:
                 if self.page.js("!!document.querySelector('textarea')") and self._wait_ws_ready(self.page, timeout=8.0):
                     return self.page
@@ -535,9 +557,13 @@ class MuseEngine:
                 log.warning("预续签 /api/session 失败（继续尝试浏览器加载）: %s", e)
 
         page = self._open_page()
-        self._apply_cookies(page, cookies, expires)
-        page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
-        self.page = page  # Cleanup must also own pages that never become ready.
+        self.page = page  # 从此处起，失败路径也必须负责清理页面和 Context。
+        try:
+            self._apply_cookies(page, cookies, expires)
+            page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
+        except Exception:
+            self._close_page()
+            raise
         if self._wait_ws_ready(page, timeout=self.cfg.login_wait):
             self.current_acc_id = account_id
             return page
