@@ -29,6 +29,7 @@ import uuid
 import unicodedata
 
 from cdp import CDP, http_json
+from proxy_bridge import ProxyBridgeManager
 
 log = logging.getLogger("muse2api")
 
@@ -133,6 +134,8 @@ class MuseEngine:
         self._active_contexts: set[str] = set()
         self._contexts_lock = threading.Lock()
         self._last_http_renew: dict[str, float] = {}
+        self.proxy_resolver = None  # app.py binds account ID -> saved proxy URL
+        self.proxy_bridges = ProxyBridgeManager()
         self._log = None
         os.makedirs(cfg.profile_dir, exist_ok=True)
 
@@ -166,6 +169,21 @@ class MuseEngine:
     @current_context_id.setter
     def current_context_id(self, val: str | None):
         self._ensure_local().current_context_id = val
+
+    @property
+    def current_proxy_url(self) -> str | None:
+        return getattr(self._ensure_local(), "current_proxy_url", None)
+
+    @current_proxy_url.setter
+    def current_proxy_url(self, value: str | None):
+        self._ensure_local().current_proxy_url = value
+
+    def proxy_for_account(self, account_id: str | None) -> tuple[str, str]:
+        """Return (upstream config, localhost bridge); no fallback after an error."""
+        configured = self.proxy_resolver(account_id) if self.proxy_resolver and account_id else ""
+        if not configured:
+            return "", ""
+        return configured, self.proxy_bridges.local_url(account_id, configured)
 
     # ---------------- 浏览器生命周期 ----------------
     def _debug_url(self):
@@ -248,6 +266,7 @@ class MuseEngine:
                 except Exception:  # noqa: BLE001
                     self.proc.kill()
             self.proc = None
+            self.proxy_bridges.close_all()
 
     # ---------------- 页面 ----------------
     def _close_page(self):
@@ -257,6 +276,7 @@ class MuseEngine:
         self.page = None
         self.current_context_id = None
         self.current_acc_id = None
+        self.current_proxy_url = None
         if p:
             try:
                 p.close()
@@ -271,15 +291,16 @@ class MuseEngine:
                 with self._contexts_lock:
                     self._active_contexts.discard(ctx_id)
 
-    def _open_page(self):
-        """仅允许独立 BrowserContext；任何失败都不得回退默认标签页。"""
+    def _open_page(self, proxy_server: str = ""):
+        """仅允许独立 BrowserContext；代理失败时绝不回退直连。"""
         if not self.browser:
             raise MuseGenerationError("浏览器 CDP 未连接，拒绝使用默认浏览器标签页")
 
         ctx_id = None
         page = None
         try:
-            res = self.browser.send("Target.createBrowserContext")
+            args = {"proxyServer": proxy_server} if proxy_server else {}
+            res = self.browser.send("Target.createBrowserContext", args)
             ctx_id = res.get("result", {}).get("browserContextId")
             if not ctx_id:
                 raise MuseGenerationError("创建独立 BrowserContext 未返回 ID，拒绝继续")
@@ -334,12 +355,14 @@ class MuseEngine:
 
     @staticmethod
     def renew_session_http(cookies: dict, expires: dict | None = None,
-                           wake_vm: bool = True) -> dict:
+                           wake_vm: bool = True, proxy_server: str = "") -> dict:
         """直接调用 muse.ai/api/session 续签 hatch_vml (+48h) / hatch_sess (+30d) / hatch_gw (+1y)，
         并按需调用 /api/hatch/vm/wake 唤醒云端工作区 VM。"""
         import requests
         cur_cookies = dict(cookies or {})
         cur_exp = dict(expires or {})
+        proxy_kwargs = ({"proxies": {"http": proxy_server, "https": proxy_server}}
+                        if proxy_server else {})
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
             "Origin": "https://muse.ai",
@@ -351,7 +374,7 @@ class MuseEngine:
         }
         try:
             r = requests.get("https://muse.ai/api/session", headers=headers,
-                             timeout=12, allow_redirects=False)
+                             timeout=12, allow_redirects=False, **proxy_kwargs)
         except requests.RequestException as exc:
             # 不回显请求内容：异常可能包含带凭据的代理 URL。
             raise MuseGenerationError(
@@ -384,12 +407,12 @@ class MuseEngine:
                     "vm_id": vm_id,
                     "retry_count": 0,
                     "connect_attempt_id": str(uuid.uuid4()),
-                }, timeout=8)
+                }, timeout=8, **proxy_kwargs)
                 wake_requested = rw.status_code == 200
                 if wake_requested:
                     # HTTP 200 acknowledges the request; only session state confirms the VM woke.
                     verify = requests.get("https://muse.ai/api/session", headers=headers,
-                                          timeout=12, allow_redirects=False)
+                                          timeout=12, allow_redirects=False, **proxy_kwargs)
                     if verify.status_code == 200:
                         verified_session = verify.json()
                         if isinstance(verified_session, dict) and verified_session.get("status") == "assigned":
@@ -529,8 +552,10 @@ class MuseEngine:
             pass
 
     def ensure_page(self, cookies: dict, expires: dict | None = None, account_id: str | None = None):
+        configured_proxy, proxy_server = self.proxy_for_account(account_id)
         if (self.page is not None and self.current_context_id and
-                (account_id is None or self.current_acc_id == account_id)):
+                (account_id is None or self.current_acc_id == account_id) and
+                self.current_proxy_url == configured_proxy):
             try:
                 if self.page.js("!!document.querySelector('textarea')") and self._wait_ws_ready(self.page, timeout=8.0):
                     return self.page
@@ -545,7 +570,8 @@ class MuseEngine:
         now_ts = time.time()
         if not account_id or (now_ts - last_map.get(account_id, 0) > 600):
             try:
-                renewed = self.renew_session_http(cookies, expires, wake_vm=True)
+                renewed = self.renew_session_http(cookies, expires, wake_vm=True,
+                                                  proxy_server=proxy_server)
                 if renewed.get("cookies"):
                     cookies = renewed["cookies"]
                 if renewed.get("cookies_exp"):
@@ -557,7 +583,7 @@ class MuseEngine:
             except Exception as e:
                 log.warning("预续签 /api/session 失败（继续尝试浏览器加载）: %s", e)
 
-        page = self._open_page()
+        page = self._open_page(proxy_server=proxy_server)
         self.page = page  # 从此处起，失败路径也必须负责清理页面和 Context。
         try:
             self._apply_cookies(page, cookies, expires)
@@ -567,6 +593,7 @@ class MuseEngine:
             raise
         if self._wait_ws_ready(page, timeout=self.cfg.login_wait):
             self.current_acc_id = account_id
+            self.current_proxy_url = configured_proxy
             return page
         try:
             body = (page.js("document.body ? document.body.innerText.slice(0,1200) : ''") or "").lower()
@@ -585,9 +612,10 @@ class MuseEngine:
         """显式释放当前线程所持有的页面和隔离上下文。"""
         self._close_page()
 
-    def refresh(self, cookies: dict, expires: dict | None = None):
+    def refresh(self, cookies: dict, expires: dict | None = None,
+                account_id: str | None = None):
         self._close_page()
-        return self.ensure_page(cookies, expires)
+        return self.ensure_page(cookies, expires, account_id=account_id)
 
     # ---------------- 额度查询（Settings 面板） ----------------
     # muse.ai 的额度在底部 Settings 菜单 → Settings 项 → 设置面板的
