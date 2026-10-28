@@ -333,7 +333,7 @@
           <input type="text" id="newLabel" placeholder="例如 muse-main">
         </div>
         <div style="flex:2;min-width:180px">
-          <label>认证代理（可选）</label>
+          <label>HTTP/SOCKS5 代理（可选）</label>
           <input type="password" id="newProxy" autocomplete="new-password" spellcheck="false" placeholder="http://user:pass@host:port">
         </div>
         <div style="flex:3">
@@ -1748,21 +1748,21 @@ function openProxyEditor(id){
   const account = accounts.find(a => a.id === id);
   $('proxyAccountName').textContent = account ? account.label : id;
   $('proxyCurrent').textContent = account && account.has_proxy
-    ? '已配置认证代理（账号密码不回显）' : '尚未配置代理（保留直连）';
+    ? '已配置代理（如果存在用户名密码则不回显）' : '尚未配置代理（保留直连）';
   $('proxyInput').value = '';
   $('proxyDialog').showModal();
 }
 async function saveAccountProxy(clear){
   if (!activeProxyAccount) return;
   const url = clear ? '' : $('proxyInput').value.trim();
-  if (!clear && !url) return toast('请填写带账号密码的代理地址', 'warn');
+  if (!clear && !url) return toast('请填写代理地址', 'warn');
   try {
     await api(`/admin/accounts/${activeProxyAccount}`, {
       method:'PATCH', body:JSON.stringify({proxy_url:url})
     });
     $('proxyInput').value = '';
     $('proxyDialog').close();
-    toast(clear ? '已取消代理绑定' : '认证代理已保存', 'ok');
+    toast(clear ? '已取消代理绑定' : '代理已保存', 'ok');
     loadPool();
   }catch(e){toast('保存代理失败：' + e.message, 'bad');}
 }
@@ -2212,7 +2212,7 @@ setInterval(() => {
 <dialog id="proxyDialog" style="width:min(560px,94vw);max-width:94vw;padding:22px;border-radius:12px;border:1px solid #666;background:var(--card,#20252c);color:inherit">
   <h3>账号代理配置：<span id="proxyAccountName"></span></h3>
   <p id="proxyCurrent" style="opacity:.8"></p>
-  <label for="proxyInput">HTTP / SOCKS5 用户名密码代理</label>
+  <label for="proxyInput">HTTP / SOCKS5 代理（用户名密码可选）</label>
   <input id="proxyInput" type="password" autocomplete="new-password" spellcheck="false"
          placeholder="http://user:password@proxy.example:8080"
          style="display:block;width:100%;margin:10px 0 14px;padding:10px">
