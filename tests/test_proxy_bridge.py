@@ -246,3 +246,54 @@ def test_engine_browser_context_includes_local_proxy(tmp_path):
             assert "pass" not in str(engine.browser.calls)
         finally:
             engine.proxy_bridges.close_all()
+
+
+def test_session_renew_and_vm_wake_share_proxy_without_secrets():
+    """HTTP renewal, VM wake, and confirmation must all keep the same proxy."""
+    def response(state):
+        return SimpleNamespace(status_code=200, cookies=[],
+                               json=lambda: {"status": "assigned",
+                                             "vm_id": "vm-fixture", "vm_state": state})
+    with (patch("requests.get", side_effect=[response("SUSPENDED"), response("RUNNING")]) as get,
+          patch("requests.post", return_value=SimpleNamespace(status_code=200)) as post):
+        result = MuseEngine.renew_session_http({"hatch_sess": "dummy"},
+                                              proxy_server="http://127.0.0.1:32123")
+    assert result["wake_ok"] is True
+    for call in get.call_args_list + post.call_args_list:
+        assert call.kwargs["proxies"] == {
+            "http": "http://127.0.0.1:32123",
+            "https": "http://127.0.0.1:32123",
+        }
+
+
+def test_admin_proxy_save_redacted_and_busy_change_rejected(tmp_path):
+    import app
+    from config import Config
+    from fastapi import HTTPException
+    cfg = Config(base_dir=str(tmp_path))
+    cfg.ensure_dirs()
+    isolated = Store(cfg)
+    acc = isolated.add_account({"hatch_sess": "fixture"}, label="test")
+    proxy = "socks5://admin:topsecret@127.0.0.1:1080"
+    with (patch.object(app, "store", isolated),
+          patch.object(app.ACCOUNT_POOL, "store", isolated)):
+        result = app.patch_account(acc["id"], app.AccountPatch(proxy_url=proxy))
+        assert result["has_proxy"] is True
+        assert "proxy_url" not in result
+        assert "topsecret" not in str(result)
+        assert isolated.get_account(acc["id"])["proxy_url"] == proxy
+        assert (tmp_path / "data" / "accounts.json").stat().st_mode & 0o077 == 0
+
+        with app.ACCOUNT_POOL.cond:
+            app.ACCOUNT_POOL.busy_accounts.add(acc["id"])
+        try:
+            with pytest.raises(HTTPException) as error:
+                app.patch_account(acc["id"], app.AccountPatch(proxy_url=""))
+            assert error.value.status_code == 409
+            assert isolated.get_account(acc["id"])["proxy_url"] == proxy
+        finally:
+            with app.ACCOUNT_POOL.cond:
+                app.ACCOUNT_POOL.busy_accounts.discard(acc["id"])
+        result = app.patch_account(acc["id"], app.AccountPatch(proxy_url=""))
+        assert result["has_proxy"] is False
+        assert isolated.get_account(acc["id"])["proxy_url"] == ""
