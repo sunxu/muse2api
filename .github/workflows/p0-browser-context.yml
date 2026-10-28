@@ -23,9 +23,9 @@ jobs:
       - name: Install project and offline test dependencies
         run: python -m pip install -r requirements.txt pytest httpx
       - name: Compile changed Python modules
-        run: python -m py_compile engine.py proxy_bridge.py cdp.py app.py tests/test_browser_context_isolation.py tests/test_proxy_bridge.py
+        run: python -m py_compile engine.py proxy_bridge.py cdp.py app.py tests/test_browser_context_isolation.py tests/test_proxy_bridge.py tests/test_account_lease_safety.py
       - name: Run offline BrowserContext and concurrency regressions
-        run: python -m pytest -q tests/test_browser_context_isolation.py tests/test_concurrency.py tests/test_proxy_bridge.py
+        run: python -m pytest -q tests/test_browser_context_isolation.py tests/test_concurrency.py tests/test_proxy_bridge.py tests/test_account_lease_safety.py
       - name: Run offline quota and keepalive regressions
         run: |
           python tests/test_quota_account_binding.py
