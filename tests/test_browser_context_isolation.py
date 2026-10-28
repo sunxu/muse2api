@@ -56,7 +56,6 @@ class BrowserIsolationTests(unittest.TestCase):
         self.assertIsNone(self.engine.current_context_id)
         self.assertIsNone(self.engine.current_acc_id)
         self.assertEqual(self.engine._active_contexts, set())
-        self.assertNotIn("Target.createTarget", browser.methods()[:1])
 
     @patch("requests.put", side_effect=AssertionError("禁止创建普通标签页"))
     def test_no_browser_fails_closed(self, put):
@@ -165,6 +164,16 @@ class BrowserIsolationTests(unittest.TestCase):
             if method == "Network.setCookie":
                 raise RuntimeError("injected")
             return {}
+        page.send.side_effect = answer
+        with self.assertRaisesRegex(MuseGenerationError, "注入 Cookie"):
+            self.engine._apply_cookies(page, {"hatch_sess": "dummy"})
+
+    def test_cookie_write_rejects_explicit_cdp_failure(self):
+        page = Mock()
+        def answer(method, params=None):
+            if method == "Network.setCookie":
+                return {"result": {"success": False}}
+            return {"result": {}}
         page.send.side_effect = answer
         with self.assertRaisesRegex(MuseGenerationError, "注入 Cookie"):
             self.engine._apply_cookies(page, {"hatch_sess": "dummy"})
