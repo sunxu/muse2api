@@ -1,0 +1,28 @@
+name: P0 BrowserContext isolation checks
+
+on:
+  push:
+    branches:
+      - feature/account-proxy-isolation
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  offline-isolation-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install minimal offline test dependencies
+        run: python -m pip install requests websocket-client pytest
+      - name: Compile changed Python modules
+        run: python -m py_compile engine.py cdp.py tests/test_browser_context_isolation.py
+      - name: Run offline BrowserContext tests
+        run: python -m pytest -q tests/test_browser_context_isolation.py
