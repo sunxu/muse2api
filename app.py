@@ -359,11 +359,10 @@ def safe_chat_stream(cookies: dict | None, prompt: str, expires: dict | None,
                     leased_id = acc["id"]
                     tried_ids.add(leased_id)
 
-                    # 预续期和启动均在驱动调用前：此时失败才可以尝试其他账号。
+                    # 预续期在生成驱动前完成；失败才允许切换到其他账号。
                     try:
                         refreshed = _renew_and_persist(
                             leased_id, wake_vm=True, force=attempt > 0) or acc
-                        engine.start()
                     except MuseAuthError as exc:
                         last_exc = exc
                         store.mark(leased_id, False, str(exc))
@@ -380,6 +379,8 @@ def safe_chat_stream(cookies: dict | None, prompt: str, expires: dict | None,
                         with GEN_LOCK:
                             if stop_event.is_set():
                                 return
+                            # 与图像/视频入口共用 GEN_LOCK，避免并发启动 Chromium。
+                            engine.start()
                             for chunk in engine.chat_stream(
                                 refreshed["cookies"], prompt, refreshed.get("cookies_exp"),
                                 timeout, account_id=leased_id, stop_event=stop_event
