@@ -209,3 +209,44 @@ def test_media_unknown_exception_no_secret_leak_or_retry(env, monkeypatch):
     assert len(calls) == 1
     assert "SECRET" not in str(err.value)
     assert not env[1].busy_accounts
+
+
+def test_chat_cancel_before_dispatch_never_sends(tmp_path):
+    from engine import MuseEngine
+    cfg = Config(base_dir=str(tmp_path), profile_root=str(tmp_path / "profiles"))
+    cfg.ensure_dirs()
+    engine = MuseEngine(cfg)
+    stop = threading.Event()
+    with patch.object(engine, "ensure_page") as opened:
+        stop.set()
+        assert list(engine.chat_stream({"hatch_sess": "fixture"}, "hello",
+                                       account_id="a", stop_event=stop)) == []
+        opened.assert_not_called()
+
+    stop.clear()
+    def cancel_during_setup(*args, **kwargs):
+        stop.set()
+    with (patch.object(engine, "ensure_page", side_effect=cancel_during_setup),
+          patch.object(engine, "_send") as sent):
+        assert list(engine.chat_stream({"hatch_sess": "fixture"}, "hello",
+                                       account_id="a", stop_event=stop)) == []
+        sent.assert_not_called()
+
+
+def test_media_cancel_before_send_never_submits(tmp_path):
+    from engine import MuseEngine
+    cfg = Config(base_dir=str(tmp_path), profile_root=str(tmp_path / "profiles"))
+    cfg.ensure_dirs()
+    engine = MuseEngine(cfg)
+    stop = threading.Event()
+    stop.set()
+    with (patch.object(engine, "ensure_page"),
+          patch.object(engine, "reset_thread"),
+          patch.object(engine, "_scroll_bottom"),
+          patch.object(engine, "_clear_attachments"),
+          patch.object(engine, "attachments", return_value=[]),
+          patch.object(engine, "_agent_count", return_value=0),
+          patch.object(engine, "_send") as sent):
+        with pytest.raises(app.MuseGenerationError, match="未提交生成请求"):
+            engine.generate({"hatch_sess": "fixture"}, "test", stop_event=stop)
+        sent.assert_not_called()
