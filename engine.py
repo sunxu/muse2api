@@ -426,11 +426,12 @@ class MuseEngine:
             applied = False
             for dom in (".muse.ai", "muse.ai"):
                 try:
-                    page.send("Network.setCookie", {
+                    result = page.send("Network.setCookie", {
                         "name": name, "value": value, "domain": dom,
                         "path": "/", "secure": True, "expires": exp_val,
                     })
-                    applied = True
+                    if result.get("result", {}).get("success") is not False:
+                        applied = True
                 except Exception:
                     pass
             if not applied:
