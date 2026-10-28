@@ -29,7 +29,6 @@ import uuid
 import unicodedata
 
 from cdp import CDP, http_json
-from proxy_bridge import ProxyBridgeManager
 
 log = logging.getLogger("muse2api")
 
@@ -135,6 +134,7 @@ class MuseEngine:
         self._contexts_lock = threading.Lock()
         self._last_http_renew: dict[str, float] = {}
         self.proxy_resolver = None  # app.py binds account ID -> saved proxy URL
+        from proxy_bridge import ProxyBridgeManager
         self.proxy_bridges = ProxyBridgeManager()
         self._log = None
         os.makedirs(cfg.profile_dir, exist_ok=True)
