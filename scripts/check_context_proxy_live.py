@@ -17,6 +17,9 @@ import tempfile
 import threading
 import time
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from config import Config
 from engine import MuseEngine
 from proxy_bridge import _Handler, parse_proxy
