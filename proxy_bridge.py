@@ -35,10 +35,14 @@ def parse_proxy(value: str):
             raise ValueError()
         if url.path not in ("", "/") or url.query or url.fragment:
             raise ValueError()
-        if url.username is None or url.password is None:
-            raise ValueError()
-        username, password = unquote(url.username), unquote(url.password)
-        if not username or not password:
+        # Both omitted => no authentication. Partial credentials are never valid.
+        if url.username is None and url.password is None:
+            username, password = "", ""
+        elif url.username is not None and url.password is not None:
+            username, password = unquote(url.username), unquote(url.password)
+            if bool(username) != bool(password):
+                raise ValueError()
+        else:
             raise ValueError()
         if any(ord(c) < 32 or ord(c) == 127 for c in username + password):
             raise ValueError()
@@ -46,7 +50,7 @@ def parse_proxy(value: str):
             raise ValueError()
         return ProxySpec(url.scheme.lower(), url.hostname, url.port, username, password)
     except (ValueError, TypeError) as exc:
-        raise ProxyConfigError("代理格式错误，要求 http://用户:密码@主机:端口 或 socks5://用户:密码@主机:端口") from None
+        raise ProxyConfigError("代理格式错误：使用 http(socks5)://主机:端口 或 http(socks5)://用户:密码@主机:端口") from None
 
 
 @dataclass(frozen=True)
@@ -82,13 +86,16 @@ def _read_exact(sock: socket.socket, count: int) -> bytes:
 
 
 def _socks_connect(sock: socket.socket, spec: ProxySpec, host: str, port: int):
-    sock.sendall(b"\x05\x01\x02")
-    if _read_exact(sock, 2) != b"\x05\x02":
-        raise OSError("SOCKS5 代理不接受用户名密码认证")
-    user, passwd = spec.username.encode(), spec.password.encode()
-    sock.sendall(bytes((1, len(user))) + user + bytes((len(passwd),)) + passwd)
-    if _read_exact(sock, 2) != b"\x01\x00":
-        raise OSError("SOCKS5 认证失败")
+    authenticated = bool(spec.username)
+    method = b"\x02" if authenticated else b"\x00"
+    sock.sendall(b"\x05\x01" + method)
+    if _read_exact(sock, 2) != b"\x05" + method:
+        raise OSError("SOCKS5 代理不接受指定认证方式")
+    if authenticated:
+        user, passwd = spec.username.encode(), spec.password.encode()
+        sock.sendall(bytes((1, len(user))) + user + bytes((len(passwd),)) + passwd)
+        if _read_exact(sock, 2) != b"\x01\x00":
+            raise OSError("SOCKS5 认证失败")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
@@ -183,8 +190,10 @@ class _Handler(socketserver.BaseRequestHandler):
                     replied = True
                     _tunnel(client, upstream)
             else:
-                auth = base64.b64encode(f"{spec.username}:{spec.password}".encode()).decode("ascii")
-                auth_line = f"Proxy-Authorization: Basic {auth}\r\n".encode("ascii")
+                auth_line = b""
+                if spec.username:
+                    auth = base64.b64encode(f"{spec.username}:{spec.password}".encode()).decode("ascii")
+                    auth_line = f"Proxy-Authorization: Basic {auth}\r\n".encode("ascii")
                 if method.upper() == "CONNECT":
                     upstream.sendall((f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n".encode("ascii")
                                       + auth_line + b"Proxy-Connection: close\r\n\r\n"))
