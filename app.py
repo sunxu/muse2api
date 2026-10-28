@@ -338,48 +338,48 @@ def safe_chat_stream(cookies: dict | None, prompt: str, expires: dict | None,
         last_exc = None
         tried_ids = set()
         try:
-            for attempt in range(1 if account_id else 2):
-                if stop_event.is_set():
-                    return
-                leased_id = None
-                try:
-                    try:
-                        acc = ACCOUNT_POOL.acquire(
-                            account_id=account_id if attempt == 0 else None,
-                            preferred_id=(getattr(engine, "current_acc_id", None)
-                                          if attempt == 0 else None),
-                            rotate=True, force_rotate=attempt > 0,
-                            exclude_ids=tried_ids,
-                            timeout=timeout,
-                        )
-                    except Exception:
-                        if last_exc is not None:
-                            raise last_exc
-                        raise
-                    leased_id = acc["id"]
-                    tried_ids.add(leased_id)
-
-                    # 预续期在生成驱动前完成；失败才允许切换到其他账号。
-                    try:
-                        refreshed = _renew_and_persist(
-                            leased_id, wake_vm=True, force=attempt > 0) or acc
-                    except MuseAuthError as exc:
-                        last_exc = exc
-                        store.mark(leased_id, False, str(exc))
-                        continue
-                    except Exception as exc:
-                        last_exc = exc
-                        continue
-
+            # 与媒体入口保持同一锁顺序，避免 ABBA 等待。
+            with GEN_LOCK:
+                for attempt in range(1 if account_id else 2):
                     if stop_event.is_set():
                         return
-                    # 一旦进入生成器执行，提示词是否送达无法可靠判定；
-                    # 即使首字未返回，也不再自动使用其他账号重复提交。
+                    leased_id = None
                     try:
-                        with GEN_LOCK:
+                        try:
+                            acc = ACCOUNT_POOL.acquire(
+                                account_id=account_id if attempt == 0 else None,
+                                preferred_id=(getattr(engine, "current_acc_id", None)
+                                              if attempt == 0 else None),
+                                rotate=True, force_rotate=attempt > 0,
+                                exclude_ids=tried_ids,
+                                timeout=timeout,
+                            )
+                        except Exception:
+                            if last_exc is not None:
+                                raise last_exc
+                            raise
+                        leased_id = acc["id"]
+                        tried_ids.add(leased_id)
+
+                        # 预续期在生成驱动前完成；失败才允许切换到其他账号。
+                        try:
+                            refreshed = _renew_and_persist(
+                                leased_id, wake_vm=True, force=attempt > 0) or acc
+                        except MuseAuthError as exc:
+                            last_exc = exc
+                            store.mark(leased_id, False, str(exc))
+                            continue
+                        except Exception as exc:
+                            last_exc = exc
+                            continue
+
+                        if stop_event.is_set():
+                            return
+                        # 一旦进入生成器执行，提示词是否送达无法可靠判定；
+                        # 即使首字未返回，也不再自动使用其他账号重复提交。
+                        try:
                             if stop_event.is_set():
                                 return
-                            # 与图像/视频入口共用 GEN_LOCK，避免并发启动 Chromium。
                             engine.start()
                             for chunk in engine.chat_stream(
                                 refreshed["cookies"], prompt, refreshed.get("cookies_exp"),
@@ -387,22 +387,22 @@ def safe_chat_stream(cookies: dict | None, prompt: str, expires: dict | None,
                             ):
                                 if not send_event("data", chunk):
                                     return
-                        if not stop_event.is_set():
-                            store.mark(leased_id, True, "")
-                            _sync_cookies(leased_id)
-                        return
-                    except MuseAuthError as exc:
-                        store.mark(leased_id, False, str(exc))
-                        raise
-                finally:
-                    # 关闭页面必须先于释放租约，避免其他请求复用尚未清理的状态。
-                    try:
-                        engine.close_current_page()
+                            if not stop_event.is_set():
+                                store.mark(leased_id, True, "")
+                                _sync_cookies(leased_id)
+                            return
+                        except MuseAuthError as exc:
+                            store.mark(leased_id, False, str(exc))
+                            raise
                     finally:
-                        if leased_id:
-                            ACCOUNT_POOL.release(leased_id)
-            if last_exc is not None:
-                raise last_exc
+                        # 关闭页面必须先于释放租约，避免其他请求复用尚未清理的状态。
+                        try:
+                            engine.close_current_page()
+                        finally:
+                            if leased_id:
+                                ACCOUNT_POOL.release(leased_id)
+                if last_exc is not None:
+                    raise last_exc
         except Exception as exc:
             send_event("error", exc)
         finally:
