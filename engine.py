@@ -1216,9 +1216,17 @@ class MuseEngine:
                     stop_event=None):
         """发一条消息，流式 yield 增量文本。"""
         timeout = int(timeout or getattr(self.cfg, "chat_timeout", 300))
+        if stop_event is not None and stop_event.is_set():
+            return
         self.ensure_page(cookies, expires, account_id=account_id)
+        if stop_event is not None and stop_event.is_set():
+            return
         self.reset_thread(for_chat=True)
+        if stop_event is not None and stop_event.is_set():
+            return
         base_agent, base_text, _ = self._poll_chat()
+        if stop_event is not None and stop_event.is_set():
+            return
         self._send(prompt)
 
         t_sent = time.time()
@@ -1548,6 +1556,8 @@ class MuseEngine:
         base_agent_cnt = self._agent_count()
         if time.monotonic() >= deadline:
             raise MuseGenerationError("任务准备超时，已停止发送")
+        if stop_event is not None and stop_event.is_set():
+            raise MuseGenerationError("任务已取消，未提交生成请求")
         if self._send(prompt) not in ("clicked", "enter-sent"):
             raise MuseGenerationError("提示词发送未确认，已停止生成")
         att = self._wait_attachment(
